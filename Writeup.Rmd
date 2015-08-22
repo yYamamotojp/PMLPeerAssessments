@@ -1,0 +1,223 @@
+---
+title: "Prediction Assignment For Determining Fitness Exercise Correctness"
+output: html_document
+---
+
+### Abstract
+
+---
+
+In this assignment, I build a predictive model to determine whether a particular from of exercise is peformed correctly, using accelerometer data. The data set used is originally from [http://groupware.les.inf.puc-rio.br/har](http://groupware.les.inf.puc-rio.br/har) (see the section on the Weight Lifting Exercise Dataset). 
+
+### Set Libraries
+
+---
+
+Preparing the library for the analysis.
+
+```{r, cache=TRUE, warning=FALSE, results='hide'}
+library(caret)
+library(tree)
+library(rattle)
+library(rpart.plot)
+library(randomForest)
+set.seed(12345)
+```
+
+### Loading Data
+
+---
+
+The dataset from can be downloaded as follows
+
+```{r,cache=TRUE}
+if(!file.exists("pml-training.csv")) {
+    download.file("http://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", destfile="pml-training.csv")
+}
+if(!file.exists("pml-testing.csv")) {
+    download.file("http://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv", destfile="pml-testing.csv")
+}
+
+tr.org <- read.csv("pml-training.csv", na.strings=c("", "NA", "NULL"))
+te.org <- read.csv("pml-testing.csv", na.strings=c("", "NA", "NULL"))
+dim(tr.org)
+dim(te.org)
+```
+
+### Preprocessing the data
+
+---
+
+
+There are several approaches for reducing the number of predictors.
+
+* Remove variables that we believe have too many NA values.
+
+```{r, cache=TRUE}
+tr.dena <- tr.org[, colSums(is.na(tr.org)) == 0]
+dim(tr.dena)
+```
+
+* Remove unrelevant variables. Threre are some unrelevant that can be removed as they are unlikely to be related to dependent variable.
+
+```{r, cache=TRUE}
+cols.remove <- c('X', 'user_name', 'raw_timestamp_part_1', 'raw_timestamp_part_2', 'cvtd_timestamp', 'new_window', 'num_window')
+tr.dere <- tr.dena[, -which(names(tr.dena) %in% cols.remove)]
+dim(tr.dere)
+```
+
+* Check the variables that have extremely low variance.
+
+```{r, cache=TRUE}
+zero.var <- nearZeroVar(tr.dere[sapply(tr.dere, is.numeric)], saveMetrics=TRUE)
+zero.var
+tr.nonzerovar <- tr.dere[, zero.var[, 'nzv']==0]
+dim(tr.nonzerovar)
+```
+
+* Remove highly correleated variables 90%
+
+```{r, cache=TRUE}
+corr.mat <- cor(na.omit(tr.nonzerovar[sapply(tr.nonzerovar, is.numeric)]))
+dim(corr.mat)
+corr.df <- expand.grid(row=1:dim(corr.mat)[1], col=1:dim(corr.mat)[2])
+corr.df$correlation <- as.vector(corr.mat)
+levelplot(correlation ~ row + col, corr.df)
+```
+
+```{r, cache=TRUE}
+rm.corr <- findCorrelation(corr.mat, cutoff=.90, verbose=FALSE)
+tr.decor <- tr.nonzerovar[, -rm.corr]
+dim(tr.decor)
+```
+
+We get the data that has 19,622 samples 46 variables.
+
+* Split data to trainig and testing for cross validation.
+
+```{r,cache=TRUE}
+in.train <- createDataPartition(y=tr.decor$class, p=0.7, list=FALSE)
+tr.set <- tr.decor[in.train,]
+te.set <- tr.decor[-in.train,]
+c("tr.set:", dim(tr.set), "te.set:", dim(te.set))
+```
+
+Finally, we got 13,737 samples and 46 variables for training set, also 5,885 samples and 46 variables for testing set.
+
+### Analysis
+
+---
+
+* **Regression Tree**
+
+Now we fit a tree to these data, and summarize and plot it. First, we use the *tree* packages.
+
+```{r, cache=TRUE}
+set.seed(12345)
+tree.tr <- tree(classe ~ ., data=tr.set)
+summary(tree.tr)
+plot(tree.tr)
+text(tree.tr, pretty=0, cex=.8)
+```
+
+* **Use Rpart from caret**
+
+```{r,cache=TRUE}
+model.fit <- train(classe ~ ., method="rpart", data=tr.set)
+print(model.fit)
+```
+
+* **Prettier plots**
+
+```{r, cache=TRUE}
+fancyRpartPlot(model.fit$finalModel)
+```
+
+* **Cross Validation**
+
+We are going to check the performance of the tree on the testing set.
+
+```{r, cache=TRUE}
+t.tree.pred <- predict(tree.tr, te.set, type="class")
+t.confusion.mat <- with(te.set, table(t.tree.pred, classe))
+sum(diag(t.confusion.mat)) / sum(as.vector(t.confusion.mat))
+```
+
+We got the accuracy *0.693* from *tree* package model.
+
+```{r, cache=TRUE}
+c.tree.pred <- predict(model.fit, te.set)
+c.confusion.mat <- with(te.set, table(c.tree.pred, classe))
+sum(diag(c.confusion.mat)) / sum(as.vector(c.confusion.mat))
+```
+
+On the other hand, we got the accuracy *0.50* from *caret* package model.
+
+* **Trying Pruning tree**
+
+This tree was grown to full depth, and might be too variable. We now use cross validation to prune it.
+
+```{r, cache=TRUE}
+cv.tr = cv.tree(tree.tr, FUN=prune.misclass)
+cv.tr
+plot(cv.tr)
+```
+
+It shows that when the size of the tree gose down, the deviance gose up. It means the 21 is a good size for this tree. We do not need to prune it.
+
+### Random Forests
+
+---
+
+These methods use threes as building blocks to build more complex models.
+
+* **Random Forests**
+
+Random forests build lots of bushy trees, and then average them to reduce the variance.
+
+Fit a random forest and see how well it peforms.
+
+```{r, cache=TRUE}
+set.seed(12345)
+rf.tr <- randomForest(classe ~ ., data=tr.set, ntree=100, importance=TRUE)
+rf.tr
+varImpPlot(rf.tr)
+```
+
+### Out-of Sample Accuracy
+
+---
+
+Lets evaluate the fandom forest tree model on the test set.
+
+```{r, cache=TRUE}
+rf.tree.pred <- predict(rf.tr, te.set, type="class")
+rf.confusion.mat <- with(te.set, table(rf.tree.pred, classe))
+sum(diag(rf.confusion.mat)) / sum(as.vector(rf.confusion.mat))
+```
+
+We got very hight accuracy *0.99* from *randomForest* package model.
+
+
+### Conclusion
+
+---
+
+Now we can predict the testing data.
+
+```{r, cache=TRUE}
+ans <- predict(rf.tr, te.org)
+ans
+```
+
+```{r, cache=TRUE, echo=FALSE, results='hide'}
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+pml_write_files(ans)
+```
+
